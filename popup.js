@@ -38,7 +38,6 @@ class CurrencyConverter {
         this.rateInfo = document.querySelector('.rate-info');
         this.selectModeButton = document.getElementById('selectModeButton');
 
-        // Add app info section
         const container = document.querySelector('.currency-container');
         const manifestData = await this.getManifestData();
         const appInfoDiv = document.createElement('div');
@@ -117,11 +116,11 @@ class CurrencyConverter {
     }
 
     setupEventListeners() {
-        // Show dropdown only when clicking currency code
         this.fromCode.addEventListener('click', (e) => {
             e.stopPropagation();
             this.showDropdown('from');
         });
+
         this.toCode.addEventListener('click', (e) => {
             e.stopPropagation();
             this.showDropdown('to');
@@ -130,7 +129,6 @@ class CurrencyConverter {
         this.switchButton.addEventListener('click', () => this.switchCurrencies());
         this.selectModeButton.addEventListener('click', () => this.toggleSelectionMode());
 
-        // Add input event listeners for currency amounts
         this.fromAmount.addEventListener('click', (e) => {
             e.stopPropagation();
         });
@@ -145,14 +143,15 @@ class CurrencyConverter {
             this.handleAmountInput(e, 'to');
         });
 
-        // Prevent non-numeric input
         this.fromAmount.addEventListener('keypress', this.validateNumericInput);
         this.toAmount.addEventListener('keypress', this.validateNumericInput);
 
         document.addEventListener('click', (e) => {
-            if (!this.dropdown.contains(e.target) &&
-                !this.fromCode.contains(e.target) &&
-                !this.toCode.contains(e.target)) {
+            const clickedFromCode = this.fromCode.contains(e.target);
+            const clickedToCode = this.toCode.contains(e.target);
+            const clickedDropdown = this.dropdown.contains(e.target);
+            
+            if (!clickedDropdown && !clickedFromCode && !clickedToCode) {
                 this.dropdown.style.display = 'none';
             }
         });
@@ -232,8 +231,13 @@ class CurrencyConverter {
 
     showDropdown(type) {
         const currencies = Object.keys(this.rates || this.currencyNames);
-
-        // Create search input and currency list
+        const isVisible = this.dropdown.style.display === 'flex' || this.dropdown.style.display === 'block';
+        const isSameType = this.dropdown.dataset.type === type;
+        
+        if (isVisible && isSameType) {
+            this.dropdown.style.display = 'none';
+            return;
+        }
         this.dropdown.innerHTML = `
             <div class="currency-search">
                 <input type="text" placeholder="Search currency..." />
@@ -250,12 +254,12 @@ class CurrencyConverter {
             </div>
         `;
 
-        // Position the dropdown
+        this.dropdown.dataset.type = type;
+
         const activeBox = type === 'from' ? this.fromBox : this.toBox;
         const boxRect = activeBox.getBoundingClientRect();
         const containerRect = this.dropdown.parentElement.getBoundingClientRect();
 
-        // Always position below the clicked element
         this.dropdown.style.display = 'block';
         this.dropdown.style.top = `${boxRect.bottom - containerRect.top + 5}px`;
 
@@ -296,13 +300,26 @@ class CurrencyConverter {
                     this.toCurrency = code;
                     this.toCode.textContent = code;
                 }
-                this.updateConversion();
-                this.dropdown.style.display = 'none';
 
                 chrome.storage.local.set({
                     fromCurrency: this.fromCurrency,
                     toCurrency: this.toCurrency
                 });
+
+                this.updateConversion();
+                if (this.selectionMode) {
+                    chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
+                        if (tab) {
+                            chrome.tabs.sendMessage(tab.id, {
+                                action: 'currencyUpdated',
+                                fromCurrency: this.fromCurrency,
+                                toCurrency: this.toCurrency
+                            });
+                        }
+                    });
+                }
+
+                this.dropdown.style.display = 'none';
             });
         });
     }

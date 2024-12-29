@@ -7,13 +7,32 @@ class DOMCurrencyConverter {
         this.convertedElements = new Map();
         this.selectionMode = false;
         this.highlightOverlay = null;
+        this.currentDropdownType = null;
+        this.observer = null;
+        this.updateTimeout = null;
 
         this.handleMouseMove = this.handleMouseMove.bind(this);
         this.handleClick = this.handleClick.bind(this);
         this.handleCurrencyChange = this.handleCurrencyChange.bind(this);
         this.handleSwitchCurrencies = this.handleSwitchCurrencies.bind(this);
+        this.toggleSelectionMode = this.toggleSelectionMode.bind(this);
+
+        this.debouncedHandleMouseMove = this.debounce(this.handleMouseMove, 16);
+        this.debouncedUpdatePrices = this.debounce(this.updateAllPrices.bind(this), 100);
 
         this.initialize();
+    }
+
+    debounce(func, wait) {
+        let timeout;
+        return function executedFunction(...args) {
+            const later = () => {
+                clearTimeout(timeout);
+                func(...args);
+            };
+            clearTimeout(timeout);
+            timeout = setTimeout(later, wait);
+        };
     }
 
     async initialize() {
@@ -28,7 +47,7 @@ class DOMCurrencyConverter {
                 this.initializePopup();
             }
 
-            console.log('DOMCurrencyConverter initialized with:', {
+            console.debug('DOMCurrencyConverter initialized with:', {
                 fromCurrency: this.fromCurrency,
                 toCurrency: this.toCurrency
             });
@@ -48,13 +67,17 @@ class DOMCurrencyConverter {
         this.fromBox?.addEventListener('click', () => this.showDropdown('from'));
         this.toBox?.addEventListener('click', () => this.showDropdown('to'));
         this.switchButton?.addEventListener('click', this.handleSwitchCurrencies);
-        this.selectModeButton?.addEventListener('click', () => this.toggleSelectionMode());
+        this.selectModeButton?.addEventListener('click', () => {
+            this.selectionMode = !this.selectionMode;
+            this.toggleSelectionMode(this.selectionMode);
+        });
 
         document.addEventListener('click', (e) => {
             if (this.dropdown && !this.dropdown.contains(e.target) &&
                 !this.fromBox.contains(e.target) &&
                 !this.toBox.contains(e.target)) {
                 this.dropdown.style.display = 'none';
+                this.currentDropdownType = null;
             }
         });
 
@@ -102,6 +125,11 @@ class DOMCurrencyConverter {
             if (message.action === 'toggleSelection') {
                 this.toggleSelectionMode(message.selectionMode);
                 sendResponse({ success: true });
+            } else if (message.action === 'currencyUpdated') {
+                this.fromCurrency = message.fromCurrency;
+                this.toCurrency = message.toCurrency;
+                this.debouncedUpdatePrices();
+                sendResponse({ success: true });
             }
             return true;
         });
@@ -131,13 +159,13 @@ class DOMCurrencyConverter {
         }
 
         if (enabled) {
-            document.addEventListener('mousemove', this.handleMouseMove);
+            document.addEventListener('mousemove', this.debouncedHandleMouseMove);
             document.addEventListener('click', this.handleClick);
         } else {
             if (this.highlightOverlay) {
                 this.highlightOverlay.style.display = 'none';
             }
-            document.removeEventListener('mousemove', this.handleMouseMove);
+            document.removeEventListener('mousemove', this.debouncedHandleMouseMove);
             document.removeEventListener('click', this.handleClick);
         }
 
@@ -187,8 +215,11 @@ class DOMCurrencyConverter {
             if (this.highlightOverlay) {
                 this.highlightOverlay.style.display = 'none';
             }
-
+            
+            this.selectionMode = false;
             this.toggleSelectionMode(false);
+            
+            this.updateSelectionButton();
         }
     }
 
@@ -205,26 +236,44 @@ class DOMCurrencyConverter {
     }
 
     setupMutationObserver() {
-        if (!document.body) return;
+        if (this.observer) {
+            this.observer.disconnect();
+        }
 
-        const observer = new MutationObserver((mutations) => {
-            mutations.forEach((mutation) => {
+        this.observer = new MutationObserver(mutations => {
+            let shouldUpdate = false;
+            for (const mutation of mutations) {
                 if (mutation.type === 'childList' || mutation.type === 'characterData') {
-                    this.convertedElements.forEach((originalData, element) => {
-                        if (document.contains(element)) {
-                            this.updateConvertedPrice(element, originalData);
-                        } else {
-                            this.convertedElements.delete(element);
-                        }
+                    const affectedElement = [...this.convertedElements.keys()].some(element => {
+                        return mutation.target.contains(element) || element.contains(mutation.target);
                     });
+                    if (affectedElement) {
+                        shouldUpdate = true;
+                        break;
+                    }
                 }
-            });
+            }
+            if (shouldUpdate) {
+                this.debouncedUpdatePrices();
+            }
         });
 
-        observer.observe(document.body, {
-            childList: true,
-            subtree: true,
-            characterData: true
+        if (document.body) {
+            this.observer.observe(document.body, {
+                childList: true,
+                subtree: true,
+                characterData: true
+            });
+        }
+    }
+
+    updateAllPrices() {
+        this.convertedElements.forEach((originalData, element) => {
+            if (document.contains(element)) {
+                this.updateConvertedPrice(element, originalData);
+            } else {
+                this.convertedElements.delete(element);
+            }
         });
     }
 
@@ -275,21 +324,34 @@ class DOMCurrencyConverter {
     showDropdown(type) {
         if (!this.dropdown || !this.rates) return;
 
+        if (this.currentDropdownType === type) {
+            this.dropdown.style.display = 'none';
+            this.currentDropdownType = null;
+            return;
+        }
+
         const box = type === 'from' ? this.fromBox : this.toBox;
         const rect = box.getBoundingClientRect();
 
         this.dropdown.style.top = `${rect.bottom}px`;
         this.dropdown.style.left = `${rect.left}px`;
         this.dropdown.style.display = 'block';
+        this.currentDropdownType = type;
 
-        this.dropdown.innerHTML = Object.keys(this.rates).map(currency => `
-            <div class="currency-option" data-currency="${currency}" data-type="${type}">
-                ${currency}
-            </div>
-        `).join('');
+        const newDropdown = this.dropdown.cloneNode(false);
+        this.dropdown.parentNode.replaceChild(newDropdown, this.dropdown);
+        this.dropdown = newDropdown;
+
+        this.dropdown.innerHTML = Object.keys(this.rates)
+            .sort()
+            .map(currency => `
+                <div class="currency-option" data-currency="${currency}" data-type="${type}">
+                    ${currency}
+                </div>
+            `).join('');
 
         this.dropdown.querySelectorAll('.currency-option').forEach(option => {
-            option.addEventListener('click', (e) => this.handleCurrencyChange(e));
+            option.addEventListener('click', this.handleCurrencyChange);
         });
     }
 
@@ -304,6 +366,7 @@ class DOMCurrencyConverter {
         }
 
         this.updatePopupUI();
+        this.currentDropdownType = null;  // Reset dropdown state
         if (this.dropdown) {
             this.dropdown.style.display = 'none';
         }
@@ -337,6 +400,26 @@ class DOMCurrencyConverter {
         this.toBox.querySelector('.currency-amount').textContent = convertedAmount.toFixed(2);
 
         this.rateInfo.textContent = `1 ${this.fromCurrency} = ${rate.toFixed(2)} ${this.toCurrency}`;
+    }
+
+    cleanup() {
+        if (this.observer) {
+            this.observer.disconnect();
+            this.observer = null;
+        }
+        
+        document.removeEventListener('mousemove', this.debouncedHandleMouseMove);
+        document.removeEventListener('click', this.handleClick);
+        
+        if (this.highlightOverlay && this.highlightOverlay.parentNode) {
+            this.highlightOverlay.parentNode.removeChild(this.highlightOverlay);
+        }
+        
+        this.convertedElements.clear();
+        
+        if (this.updateTimeout) {
+            clearTimeout(this.updateTimeout);
+        }
     }
 }
 
